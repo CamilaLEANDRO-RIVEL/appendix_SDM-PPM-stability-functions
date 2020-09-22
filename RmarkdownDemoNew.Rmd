@@ -1,0 +1,538 @@
+---
+title: "Demonstration of Diagnostic Tools"
+author:
+- name: Ian Renner
+  affiliation: University of Newcastle, Australia
+- name: Camila Leandro
+  affiliation: Université Paul-Valéry Montpellier 3 & Centre d'Ecologie Fonctionnelle et Evolutive, France
+date: "July 2020"
+  output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+bibliography: lucanusbib.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+This tutorial demonstrates use of the R functions that we have developed to evaluate model congruency for models fitted with \texttt{ppmlasso}. Hereafter, we refer to these as diagnostic tools.
+
+# Prerequisites
+
+## Grid of covariate data
+
+Fitting a species distribution model requires input of some covariates that we use to explain the observed species pattern. These may be environmental variables, or variables related to the sampling process, which we refer to as \textit{observer bias} variables. For \texttt{ppmlasso}, we must supply this information as a data frame, with rows corresponding to locations set along a regular grid of points at a desired pixel resolution. For each row of the data frame, the values may be raw or summarised values of the variables. For more information, see @Renner2015.
+
+We will make use of the same grid used in the main manuscript, which contains variables at a 4km resolution throughout mainland France. These variables include:
+
+* \texttt{X}: The $x$-coordinate in LAEA in metres
+* \texttt{Y}: The $y$-coordinate in LAEA in metres
+* \texttt{temp}: mean annual temperature, from Worldclim
+* \texttt{prec}: mean annual precipitation rate, from Worldclim
+* \texttt{hp}: human population density, from the Gridded Population of the World v4 database
+* \texttt{percagri}: percentage of the landscape that is used for agriculture from Corine Land Cover 2012
+* \texttt{perc311}: percentage of the landscape that is broad-leaved forest from Corine Land Cover 2012
+* \texttt{perc312}: percentage of the landscape that is coniferous forest from Corine Land Cover 2012
+* \texttt{perch10}: percentage of the landscape was covered by forest in 1910, from the 2013 HILDA database
+
+```{r}
+load("Env_Fr_4km.RData") # loads env.4km.Fr, our grid
+env = env.4km.Fr # rename grid
+```
+
+We choose to model on the km scale instead of the metre scale, so we divide the coordinates by 1000, as follows: 
+
+```{r}
+env$X = env$X/1000
+env$Y = env$Y/1000
+head(env)
+```
+
+The models we fit require covariates to be measured at each location in the grid. If the grid has missing information for some locations, we recommend these locations be removed from the grid before proceeding any further.
+
+## Fitting a regularisation path using the full data set
+
+Our diagnostic tools use the output from the optimal model fitted to the full set of data as a reference point for comparison. As the real point data for the stag beetle \texttt{Lucanus servus} may be sensitive, we demonstrate this on a set of 2449 points simulated from the intensity map using the full set of data in the main manuscript.
+
+```{r}
+load("Simulated Lucanus points.RData")
+sp.dat = data.frame(X = simX, Y = simY)
+head(sp.dat)
+dim(sp.dat)
+```
+
+We now specify the formula we use in the model. In the manuscript, we include temperature and precipation as quadratic terms, the percentage landscape variables as linear terms, and the natural logarithm of the human population density.
+
+```{r, results="hide"}
+form = ~ poly(temp, prec, degree = 2, raw = TRUE) + perch10 + perc311 + perc312 + 
+    percagri + log(hp) # formula for ppmlasso
+```
+
+We are now ready to fit the regularisation path of models using \texttt{ppmlasso}. We now load the \texttt{ppmlasso} and \texttt{data.table} packages, as well as some new functions which will appear in an update of the \texttt{ppmlasso} package.
+
+```{r, message=FALSE}
+library(ppmlasso)
+library(data.table)
+source("ppmlasso_functions.R")
+source("New functions.R")
+```
+
+We prepare the data for fitting with the \texttt{ppmdat()} function. Here, we specify the following arguments:
+
+* \texttt{sp.xy}: a data frame containing the $x$- and $y$-coordinates of the species
+* \texttt{sp.scale}: the spatial resolution at which to fit the model
+* \texttt{back.xy}: the environmental grid
+* \texttt{coord}: the names of the vectors containing the $x$- and $y$-coordinates in the \texttt{sp.xy} and \texttt{back.xy} data frames
+* \texttt{sp.file}: an optional previously created file of species data to import
+* \texttt{quad.file}: an optional previously created environmental grid to import
+* \texttt{file.name}: by default, this function saves the output as an \texttt{.RData} file, and this argument specifies the name of the file.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+data.po  = ppmdat(sp.xy = sp.dat, sp.scale = 4, back.xy = env, coord = c("X","Y"),
+                  sp.file = NA, quad.file = NA, file.name = "TestPPM") 
+```
+
+We now may fit a regularisation path of models fitted with increasing lasso penalties with the \texttt{ppmlasso()} function. See the documentation of the \texttt{ppmlasso()} function in R for full details of the arguments and the output. In essense, this function will fit \texttt{n.fits} Poisson point process models with increasing lasso penalties, and choose among them the model which optimises some \texttt{criterion} (BIC by default).
+
+```{r results='hide', message=FALSE, warning=FALSE}
+fitAll = ppmlasso(form, sp.xy = sp.dat, env.grid = env, sp.scale = 4, data = data.po, 
+                n.fits = 200, criterion = "bic", max.it = 10, lamb = NA)
+```
+
+Hence, the obejct \texttt{fitAll} contains all of the information from the optimal model fitted to the full set of 2449 points. The coefficients are contained in a vector called \texttt{beta}:
+
+```{r}
+fitAll$beta
+```
+
+We may also want to visualise a map of the predicted intensities. Because we include an observer bias variable in our model (the natural logarithm of human population density), we will want to correct for this bias using the method of @Warton2013. With this method, we essentially neutralise the effect of any observer bias variables by setting them equal to some constant for prediciton. To do this, we will initialise a new data frame \texttt{pred.data} to be equal to the grid used to fit the model:
+
+```{r}
+pred.data = env
+```
+
+We then replace the observer bias variable (in this case \texttt{hp}) with a constant. Here, we will replace it with the mean human population density throughout the region. 
+
+```{r}
+bias.var = c("hp")
+bias.col = match(bias.var, names(pred.data))
+
+for (v in bias.col)
+{
+  pred.data[,v] = mean(pred.data[,v])
+}
+```
+
+We can now calculate the corrected intensities with the \texttt{predict.ppmlasso()} function.
+
+```{r, message=FALSE, warning=FALSE}
+correctedmu = predict.ppmlasso(fitAll, newdata = pred.data)
+```
+
+We can map these intensities using the \texttt{levelplot()} function of the \texttt{lattice} package. We will load a pre-defined color scheme for the map from the file \texttt{ColorScheme.RData}.
+
+```{r}
+library(lattice)
+load("ColorScheme.RData")
+levelplot(correctedmu ~ env$X + env$Y, cuts = 100, asp = "iso", 
+          col.regions = col2, xlab = "", ylab = "")
+```
+
+# Fitting models to random subsets of points
+
+Our diagnostic tools rely on taking random subsets of the observed species data. While the manuscript uses 1000 simulations, we only demonstrate one here for a single subset size. Full code to conduct 1000 simulations across all considered subsample sizes are included in the R script \texttt{SimulationDemo.R}.
+
+Let us consider a subset of size 1000, stored in a data frame called \texttt{sp.sim}.
+
+```{r, results="hide"}
+n.pts = 1000
+sim = 1
+set.seed(sim)
+pts_keep = sample(1:dim(sp.dat)[1], n.pts)
+sp.sim = sp.dat[pts_keep,]
+```
+
+We now fit a regularisation path to the subset of 1000 points.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+data.po  = ppmdat(sp.xy = sp.sim, sp.scale = 4, back.xy = env, coord = c("X","Y"),
+                  sp.file = NA, quad.file = NA, file.name = "TestPPM")
+fit.sim = ppmlasso(form, sp.xy = sp.sim, env.grid = env, sp.scale = 4, 
+                   data = data.po, n.fits = 200, criterion = "bic", max.it = 10, 
+                   lamb = NA) 
+```
+
+For each simulated subset of a nominal size, we store the fitted coefficients in an array called \texttt{beta.sims}, and the means and standard deviations of the covariates necessary for rescaling prior to making predictions in arrays called \texttt{s.means.sims} and \texttt{s.sds.sims}, respectively. 
+
+First, we initialise these arrays, as follows:
+
+```{r}
+n_var = 11 # for creating matrix dimensions for simulations (10 variables plus 1 intercept)
+n.sim = 1000 # number of simulations
+subset_sizes = c(1000, 500, 200, 100, 50) # subset sizes
+
+beta.sims = array(NA, dim = c(length(subset_sizes), n.sim, n_var))
+s.means.sims = s.sds.sims = array(NA, dim = c(length(subset_sizes), n.sim, (n_var - 1))) 
+# n_var minus the "intercept" (-1)
+dimnames(beta.sims)[[1]] = subset_sizes
+dimnames(beta.sims)[[3]] = names(fitAll$beta)
+```
+
+We now fill the corresponding elements of these arrays for our subset of size 1000:
+
+```{r}
+beta.sims[1,sim,] = fit.sim$beta
+s.means.sims[1,sim,] = fit.sim$s.means
+s.sds.sims[1,sim,] = fit.sim$s.sds
+```
+
+We will load the results of 1000 simulations from the file \texttt{SimulatedData.RData} across the subset sizes ($n = 50, 100, 200, 500, 1000$) to demonstrate the use of the developed tools to diagnose model congruency.
+
+```{r}
+load("SimulatedData.RData")
+```
+
+This file contains the following objects:
+
+* \texttt{beta.sims}: a $5 \times 1000 \times 11$ array of the fitted coefficients $\hat{\boldsymbol{\beta}}$ and $\hat{\boldsymbol{\gamma}}$. These dimensions correspond to 5 subset sizes ($n = 50, 100, 200, 500, 1000$), 1000 random subsamples, and 11 covariates. Crucially, the array is given names for the first dimension corresponding to the subset sizes as well as for the third dimension corresponding to the names of the covariates, as these names are used in plots to follow:
+
+```{r}
+dimnames(beta.sims)
+```
+
+* \texttt{s.means.sims}: a $5 \times 1000 \times 10$ array of the means of the 10 covariates (excluding the intercept) for the 1000 simulations across the 5 subsets. 
+* \texttt{s.sds.sims}: a $5 \times 1000 \times 10$ array of the standard deviations of the 10 covariates (excluding the intercept) for the 1000 simulations across the 5 subsets.
+
+These arrays of the means and standard deviations are necessary as the \texttt{ppmlasso()} function rescales all covariates to have mean 0 and variance 1 before fitting models to ensure that the lasso penalty is applied appropriately. Hence, we need to record the means and standard deviations to appropriately rescale new input data for prediction.
+
+# Diagnostic tools for model intensity
+
+Now that we have loaded the output from the models fitted to each of the random subsets, we can demonstrate the tools we have developed to assess model stability. These tools are available in the script \texttt{DiagnosticFunctions.R}.
+
+Our first set of tools compares the fitted intensity of the model fitted to the full set of points to the rescaled intensities of the models fitted to the random subsets. The \texttt{compute\_intensity()} function calculates the raw and rescaled fitted intensities for all the subset models. The function takes the following input:
+
+* \texttt{fitN}: the model fitted to the full set of points
+* \texttt{simbetas}: the array containing the coefficients of the models fitted to the random subsets
+* \texttt{simmeans}: the array containing the covariate means of the models fitted to the random subsets
+* \texttt{simsds}: the array containing the covariate standard deviations of the models fitted to the random subsets 
+* \texttt{PredData}: the covariates for prediction 
+
+```{r, results="hide", message=FALSE, warning=FALSE}
+source("DiagnosticFunctions.R")
+all_mus = compute_intensity(fitN = fitAll, simbetas = beta.sims, simmeans = s.means.sims,
+                            simsds = s.sds.sims, PredData = pred.data)
+```
+
+## Proportion of models with a meaningful environmental effect
+
+When we first examine the models, we may want to see the proportion of the subset models that have a meaningful environmental effect. Our models are fitted with a lasso penalty, and consequently some of the fitted coefficients may be shrunk to 0, effectively removing the effect of the corresponding covariates. If all of the coefficients of the environmental covariates are equal to 0 (i.e if $\hat{\beta}_j = 0$ for all $j$), there is no predicted environmental effect and the map of predicted intensities will be uniform. We would expect that as the subset size increases, the proportion of fitted models with no environmental effect will decrease.
+
+We can check this with the \texttt{ZeroEnvEffect()} function, which takes as input an array \texttt{mus} containing the intensities computed from the \texttt{compute\_intensity()} function, as follows:
+
+```{r}
+enveffect = ZeroEnvEffect(mus = all_mus)
+enveffect
+```
+
+We see that once the subset size reaches $N = 500$, all of the fitted models have some meaningful environmental effect.
+
+## Maps of average intensity
+
+We may visually assess model congruency by considering the average rescaled intensity throughout the study region across the various subset sizes. The rescaling is key here: as subset size increases, we would expect the intercept to increase as well, such that the maximum predicted intensity will naturally grow with subset size. As such, mapping the average raw intensities $\hat{\mu}_{\text{avg}, N}(s)$ across different subset sizes $N$ is likely to produce maps with different scales. Consequently, rescaling the intensities to have the same mean as the model fitted with all points should produce maps with comparable scales such that comparisons can be more readily made, and we therefore map the rescaled intensities $\hat{\mu}_{\text{avg}, N, m}(s)$.
+
+First, we determine a common upper limit for the scale:
+
+```{r}
+zmax = rep(NA, 5) # maximum average rescaled intensity for each subset size
+for (i in 1:5)
+{
+  zmax[i] = max(apply(all_mus$rescale_mus[i,,], 2, mean)) 
+}
+zmax = c(zmax, max(correctedmu)) # add maximum fitted intensity for model with all points
+zplot = max(zmax) # Largest maximum will serve as the upper limit in the plot
+```
+
+Now, we can use the \texttt{avg\_mu\_plot()} function to map the average intensity for each subset size, and compare it to the map of the model that uses all $n = 2449$ points. The \texttt{avg\_mu\_plot()} function takes the following input:
+
+* \texttt{mus}: an array containing the intensities computed from the \texttt{compute\_intensity()} function
+* \texttt{subsetsize}: the subset size to use for the plot
+* \texttt{XY}: a data frame containing the $x$- and $y$-coordinates for plotting
+* \texttt{f}: the function to be applied to the intensity before mapping. For example, the user may enter \texttt{f = log} to produce a map of the natural logarithm of the intensities. Set to the identity function by default.
+* \texttt{mu.min}: the minimum non-zero intensity to be used. All intensities less than \texttt{mu.min} are truncated to be equal to \texttt{mu.min}. If we allow the fitted intensity to be very low and plot the logarithm of the intensities, we risk the scale of the coloring being overwhelmed by the low value. By default, this is set to $10^{-5}$
+* \texttt{intensity}: whether to plot the raw intensities or (by default) the rescaled intensities. Entering anything other than "rescaled" will return a map of the average raw intensities.
+* \texttt{...}: arguments to be passed to the \texttt{levelplot()} function such that the plot may be customised by the user.
+
+```{r}
+avg_mu_plot(mus = all_mus, subsetsize = 50, XY = env[,1:2], mu.min = 1.e-5, 
+            intensity = "rescaled", col.regions = col2, main = "n = 50", 
+            xlab = "", ylab = "", cuts = 100, at = seq(0, zplot, length.out = 99))
+avg_mu_plot(mus = all_mus, subsetsize = 100, XY = env[,1:2], mu.min = 1.e-5, 
+            intensity = "rescaled", col.regions = col2, main = "n = 100", 
+            xlab = "", ylab = "", cuts = 100, at = seq(0, zplot, length.out = 99))
+avg_mu_plot(mus = all_mus, subsetsize = 200, XY = env[,1:2], mu.min = 1.e-5, 
+            intensity = "rescaled", col.regions = col2, main = "n = 200", 
+            xlab = "", ylab = "", cuts = 100, at = seq(0, zplot, length.out = 99))
+avg_mu_plot(mus = all_mus, subsetsize = 500, XY = env[,1:2], mu.min = 1.e-5, 
+            intensity = "rescaled", col.regions = col2, main = "n = 500", 
+            xlab = "", ylab = "", cuts = 100, at = seq(0, zplot, length.out = 99))
+avg_mu_plot(mus = all_mus, subsetsize = 1000, XY = env[,1:2], mu.min = 1.e-5, 
+            intensity = "rescaled", col.regions = col2, main = "n = 1000", 
+            xlab = "", ylab = "", cuts = 100, at = seq(0, zplot, length.out = 99))
+levelplot(correctedmu ~ env$X + env$Y, cuts = 100, asp = "iso", 
+          col.regions = col2, main = "n = 2449", xlab = "", ylab = "", 
+          at = seq(0, zplot, length.out = 99)) # all 2449 points
+```
+
+Visually, we see that the maps begin to resemble each other once the subset size reaches $N = 500$ points.
+
+## Maps of the standard deviation
+
+While mapping the average rescaled intensities as above gives us a snapshot of the mean, it does not tell us how precise these point estimates are. We may wish to quantify the uncertainty of these point estimates.
+
+Many software packages, including \texttt{spatstat}, produce standard errors for both coefficients and the fitted intensities. However, there is no theoretical standard error derivation for coefficients or intensities when models are fitted with a lasso penalty. Nonetheless, we can map the standard deviation of the rescaled intensities at each subset size as a way to quantify their uncertainty.
+
+The \texttt{sd\_plot()} function allows us to map standard deviations computed from the simulated subsets, as follows. The function takes as input:
+
+* \texttt{mus}: an array containing the intensities computed from the \texttt{compute\_intensity()} function
+* \texttt{subsetsize}: the subset size to use for the plot
+* \texttt{XY}: a data frame containing the $x$- and $y$-coordinates for plotting
+* \texttt{f}: the function to be applied to the standard deviation before mapping. For example, the user may enter \texttt{f = log} to produce a map of the natural logarithm of the standard deviations. Set to the identity function by default.
+* \texttt{intensity}: whether to plot the standard deviation of the raw intensities or (by default) the rescaled intensities. Entering anything other than "rescaled" will return a map of the standard deviation of the raw intensities.
+* \texttt{...}: arguments to be passed to the \texttt{levelplot()} function such that the plot may be customised by the user.
+
+```{r}
+sd_plot(mus = all_mus, subsetsize = 50, XY = env[,1:2], col.regions = col2, 
+        main = "n = 50", xlab = "", ylab = "", cuts = 100)
+sd_plot(mus = all_mus, subsetsize = 100, XY = env[,1:2], col.regions = col2, 
+        main = "n = 100", xlab = "", ylab = "", cuts = 100)
+sd_plot(mus = all_mus, subsetsize = 200, XY = env[,1:2], col.regions = col2, 
+        main = "n = 200", xlab = "", ylab = "", cuts = 100)
+sd_plot(mus = all_mus, subsetsize = 500, XY = env[,1:2], col.regions = col2, 
+        main = "n = 500", xlab = "", ylab = "", cuts = 100)
+sd_plot(mus = all_mus, subsetsize = 1000, XY = env[,1:2], col.regions = col2, 
+        main = "n = 1000", xlab = "", ylab = "", cuts = 100)
+```
+
+We see that for each subset size, the standard deviation tends to be highest where the intensity is highest. This is not surprising, as we are fitting Poisson point process models, which implies that the variance grows proportionally with the mean.
+
+## Integrated mean square error
+
+The integrated mean square error (ISME) provides a single number to measure alignment between the fitted intensities of the model using all the points ($\hat{\mu}(s)$) with the rescaled intensities of the models fitted to the subsets ($\hat{\mu}_{i, N, m}(s)$). The lower the IMSE, the greater the alignment.
+
+The function \texttt{IMSE\_plot()} produces a plot of the integrated mean square error for the various subset models, along with a trace plot of the mean. It takes as input the following arguments:
+
+* \texttt{muN}: the intensity surface $\hat{\mu}(s)$ of the model fitted to all points
+* \texttt{mus}: the array of rescaled intensities produced by the \texttt{compute\_intensity()} function
+* \texttt{mu.min}: the minimum non-zero intensity to be used in computing IMSE. If we allow the fitted intensity to be very low and define the IMSE on the logarithm of the intensities as in the main manuscript, we risk overweighting those fitted intensities which are very small. By default, this is set to $10^{-5}$.
+* \texttt{f}: a function to apply to the computed IMSE for plotting. Options include "log" and "sqrt", and the default is set to \texttt{NULL} such that no transformation is carried out.
+* \texttt{col}: a color vector set as a proportion from 0 to 1 of red, green, and blue such that the \texttt{rgb()} function may produce appropriately transparent colours for plotting
+* \texttt{...}: other arguments to be passed to an internal function \texttt{IMSE()}. For example, the \texttt{IMSE()} function computes the integrated mean square error based on the natural logarithm of the intensities by default. This can be changed by setting \texttt{f\_intensity = sqrt}, for instance, to compute the IMSE based on the square root of the intensities instead, or \texttt{f\_intensity = identity} to compute the IMSE based on the raw intensities.
+
+```{r}
+plotIMSE = IMSE_plot(muN = correctedmu, mus = all_mus, f = "log")
+```
+
+We see that the IMSE tends to decrease as subset size increases, suggesting greater alignment between the models produced using larger subsets and the model fitted using the complete data set.
+
+The \texttt{IMSE\_plot()} function returns both the calculated integrated mean square error for each subset as well as the mean for each subset size.
+
+## Correlation measures
+
+Correlation provides another measure of the alignment between the fitted intensities of the model using all the points ($\hat{\mu}(s)$) with the rescaled intensities of the models fitted to the subsets ($\hat{\mu}_{i, N, m}(s)$).
+
+The function \texttt{Corr\_plot()} produces a plot of the chosen correlation measure for the various subset models, along with a trace plot of the mean, analogous to the \texttt{IMSE\_plot()} function. It takes as input the following arguments:
+
+* \texttt{muN}: the intensity surface $\hat{\mu}(s)$ of the model fitted to all points
+* \texttt{mus}: the array of rescaled intensities produced by the \texttt{compute\_intensity()} function
+* \texttt{mu.min}: the minimum non-zero intensity to be used in computing IMSE. If we allow the fitted intensity to be very low and define the IMSE on the logarithm of the intensities as in the main manuscript, we risk overweighting those fitted intensities which are very small. By default, this is set to $10^{-5}$.
+* \texttt{method}: which correlation method to compute. Pearson correlations are produced by default, but entering "spearman" or "kendall" will produce plots of Spearman's $\rho$ or Kendall's $\tau$.
+* \texttt{f}: a function to apply to the computed correlation for plotting. Options include "log" and "sqrt", and the default is set to \texttt{NULL} such that no transformation is carried out.
+* \texttt{col}: a color vector set as a proportion from 0 to 1 of red, green, and blue such that the \texttt{rgb()} function may produce appropriately transparent colours for plotting
+* \texttt{...}: other arguments to be passed to an internal function \texttt{CorrSims()}. For example, we could compute correlations between the natural logarithm of the intensities by setting \texttt{f\_intensity = log}.
+
+```{r, message=FALSE, warning=FALSE}
+pearson = Corr_plot(muN = correctedmu, mus = all_mus, mu.min = 1.e-5, f_intensity = log)
+spearman = Corr_plot(muN = correctedmu, mus = all_mus, mu.min = 1.e-5, method = "spearman")
+```
+
+We see that as subset size increases, both the Pearson correlation of the log intensities and Spearman's $\rho$ increase. Once the subset size reaches $N = 500$, the alignment is quite strong, with the Pearson correlation greater than 0.98 and Spearman's $\rho$ greater than 0.96.
+
+The \texttt{Corr\_plot()} function returns both the calculated correlation measure for each subset as well as the mean for each subset size.
+
+## Quantile Matching
+
+While the previous tools are useful summaries of the overall alignment between the fitted intensities of the model using all the points ($\hat{\mu}(s)$) with the rescaled intensities of the models fitted to the subsets ($\hat{\mu}_{i, N, m}(s)$), they do not indicate where the intensity surfaces differ. 
+
+The function \texttt{quantilematch()} produces a map of the proportion of subsets which place the locations into different categories than the categories from the model which uses the full set of available data as defined by user-supplied quantiles. In this way, it indicates regions where categories of intensity are most likely to differ between the models fitted to random subsets and the model fitted with all of the data points. It takes as input the following arguments:
+
+* \texttt{muN}: the intensity surface $\hat{\mu}(s)$ of the model fitted to all points
+* \texttt{mus}: the array of rescaled intensities produced by the \texttt{compute\_intensity()} function
+* \texttt{subsetsize}: the subset size to use for the plot
+* \texttt{XY}: a data frame containing the $x$- and $y$-coordinates for plotting
+* \texttt{quantiles}: a vector of quantiles which defines the categories, by default set to $(0.2, 0.4, 0.6, 0.8)$
+
+```{r, message=FALSE, warning=FALSE}
+q50 = quantilematch(correctedmu, all_mus, 50, env[,1:2], 
+              col.regions = col2, main = "n = 50", 
+              xlab = "", ylab = "", cuts = 100, 
+              at = seq(0, 1, length.out = 99))
+q100 = quantilematch(correctedmu, all_mus, 100, env[,1:2], 
+              col.regions = col2, main = "n = 100", 
+              xlab = "", ylab = "", cuts = 100, 
+              at = seq(0, 1, length.out = 99))
+q200 = quantilematch(correctedmu, all_mus, 200, env[,1:2], 
+              col.regions = col2, main = "n = 200", 
+              xlab = "", ylab = "", cuts = 100, 
+              at = seq(0, 1, length.out = 99))
+q500 = quantilematch(correctedmu, all_mus, 500, env[,1:2], 
+              col.regions = col2, main = "n = 500", 
+              xlab = "", ylab = "", cuts = 100, 
+              at = seq(0, 1, length.out = 99))
+q1000 = quantilematch(correctedmu, all_mus, 1000, env[,1:2], 
+              col.regions = col2, main = "n = 1000", 
+              xlab = "", ylab = "", cuts = 100, 
+              at = seq(0, 1, length.out = 99))
+```
+
+We see that the level of misalignment is initially very high, because most of the models for subset sizes $N = 50$ and $N = 100$ set all coefficients to 0. Once we reach a subset size of $N = 500$, the level of misalignment is much lower. Even at $N = 1000$, however, there are certain regions (in particular in the east near the border with Switzerland and in the southwest along the Atlantic coast) where there is relatively high misalignment.
+
+The \texttt{quantilematch()} function returns the assigned groups for both the model using all of the available data as well as for each of the subsets, along with the misalignment proportions plotted in the map.
+
+# Diagnostic tools for model coefficients
+
+A second class of diagnostic tools explores changes in the fitted coefficients $\hat{\boldsymbol{\beta}}$ and $\hat{\boldsymbol{\gamma}}$ as subset size changes. These fitted coefficients are used to produce the intensity maps, but their values may be of ecological interest, as their sign and magnitude provides insight into the direction and strength of the effect.
+
+## Scatterplots of the fitted coefficients
+
+The function \texttt{coef\_plot()} produces a scatterplot of the different fitted coefficients $\hat{\boldsymbol{\beta}}_{i, N}$ and $\hat{\boldsymbol{\gamma}}_{i, N}$ for the models produced by the random subsets of different sizes, along with a trace plot of the mean. 
+
+This function takes as arguments the following:
+
+* \texttt{v}: the index of the variable to plot
+* \texttt{fitN}: the model fitted with the \texttt{ppmlasso()} function to the full set of species data
+* \texttt{simbetas}: the array containing the coefficients of the models fitted to the random subsets
+* \texttt{col}: a color vector set as a proportion from 0 to 1 of red, green, and blue such that the \texttt{rgb()} function may produce appropriately transparent colours for plotting
+
+We would expect that the coefficient estimates $\hat{\boldsymbol{\beta}}_{i, N}$ and $\hat{\boldsymbol{\gamma}}_{i, N}$ will converge toward the values $\hat{\boldsymbol{\beta}}$ and $\hat{\boldsymbol{\gamma}}$ computed from the model using the full set of points.
+
+```{r}
+par(mfrow = c(1, 2))
+coef_plot(v = 2, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 3, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 4, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 5, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 6, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 7, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 8, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 9, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 10, fitN = fitAll, simbetas = beta.sims)
+coef_plot(v = 11, fitN = fitAll, simbetas = beta.sims)
+```
+
+We see that the coefficient estimates tend to converge to the values obtained from the model fitted using all 2449 points, and that the variation in the estimates decreases with increasing subset size. In most cases, the coefficient estimates appear stable after the subset size $N = 500$.
+
+We also see that there is a general tendency for the standard deviation for the coefficients to increase from $N = 50$ to $N = 200$ and then decrease thereafter. This may appear counterintuitive, but as many of the coefficient estimates are set to 0 for models of subset size $N = 50$, this has the effect of decreasing the standard deviation across all simulations. Those coefficients which are non-zero tend to have a large spread, as shown in the graph with a large range of values $\hat{\beta}_{j, i, 50}$. In other words, there is a strong pull toward 0 for $N = 50$ (as shown in the analysis of coefficient signs in the next subsection), but those coefficients which are not set to 0 tend to be more variable. As subset size increases, the range of the fitted coefficients $\hat{\beta}_{j, i, N}$ tends to decrease, but as fewer coefficients are set to 0, the overall standard deviation tends to be higher across all 1000 simuluated subsets for $N = 100$ and $N = 200$. Once the subset size reaches 500, however, the range becomes small enough that the overall standard deviation starts to decrease, despite very few coefficients being set to 0. 
+
+## Coefficient standard error plots
+
+We can produce a trace plot of the standard deviation of the coefficient estimates with the \texttt{coef\_se\_plot()} function:
+
+```{r}
+par(mfrow = c(1, 2))
+coef_se_plot(v = 2, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 3, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 4, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 5, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 6, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 7, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 8, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 9, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 10, fitN = fitAll, simbetas = beta.sims)
+coef_se_plot(v = 11, fitN = fitAll, simbetas = beta.sims)
+```
+
+These plots confirm the general trends discussed in the previous section. As the subset size increases from $N = 50$ to $N = 200$, the standard deviations tend to increase as fewer of the estimated coefficients $\hat{\beta}_{j, i, N}$ are set to 0, and then decreases thereafter with increasing subset size.
+
+## Signs of the fitted coefficients
+
+The sign of the coefficients may be of particular importance, as it provides insight into the nature of the effects of the corresponding covariates. A positive coefficient $\hat{\beta}_i$ implies that increasing values of covariate $i$ are associated with higher intensities of the species, while a negative coefficient $\hat{\beta}_j$ implies that increasing values of covariate $j$ are associated with lower intensities of the species. Meanwhile, a zero coefficient $\hat{\beta}_k = 0$ implies that covariate $k$ has no effect on the species intensity.
+
+The function \texttt{signcoefs()} summarises the sign information when supplied with \texttt{simbetas}, the array containing the coefficients of the models fitted to the random subsets.
+
+```{r}
+signcoefs(simbetas = beta.sims)
+```
+
+Here we see that an expected drift away from 0 with increasing subset size. This makes sense as models informed by more data points tend to require less shrinkage via the LASSO as judged by BIC. We can see unanimously positive effects of \texttt{temp}, \texttt{perch10}, and \texttt{log(hp)} when $N = 1000$, and unanimously negative effects of \texttt{temp\^{}2}, \texttt{percagri}, and the interaction term \texttt{temp*prec}. Meanwhile, the coefficients for \texttt{prec\^{}2} and \texttt{perc311} are nearly always positive with $N = 1000$, while the coefficient for \texttt{perc312} is nearly always negative. The only covariate without such a strong signal is \texttt{prec}, which is still estimated to be 0 in a majority of subsets of size $N = 1000$, and nearly equally balanced between positive and negative signs otherwise.
+
+## Bar plot of coefficient signs
+
+The \texttt{signplot()} function visualises the signs of the fitted coefficients as a bar plot, with one bar for each subset size. The red, white, and blue portions of each bar correspond to positive, zero, and negative coefficient estimates. 
+
+```{r}
+par(mfrow = c(1, 2))
+signplot(simbetas = beta.sims, v = 2)
+signplot(simbetas = beta.sims, v = 3)
+signplot(simbetas = beta.sims, v = 4)
+signplot(simbetas = beta.sims, v = 5)
+signplot(simbetas = beta.sims, v = 6)
+signplot(simbetas = beta.sims, v = 7)
+signplot(simbetas = beta.sims, v = 8)
+signplot(simbetas = beta.sims, v = 9)
+signplot(simbetas = beta.sims, v = 10)
+signplot(simbetas = beta.sims, v = 11)
+```
+
+The drift away from 0 with increasing subset size is apparent with the vanishing white portions of the bars. We likewise confirm that even with a subset size of $N = 1000$, the estimated coefficients for \texttt{prec} vary in sign.
+
+# Creating raster objects
+
+Users may wish to store some of the mapped values as raster objects. To this end, the function \texttt{makeraster} may be used to create a raster object in \texttt{R}, and to optionally save it as a \texttt{.tif} file. To create a raster object in \texttt{R}, we must load the \texttt{raster} package.
+
+```{r, message=FALSE, warning=FALSE}
+library(raster)
+```
+
+This function takes as arguments the following:
+
+* \texttt{v\_frame}: a data frame containing columns \texttt{X} and \texttt{Y} with the $x$ and $y$ coordinates as well as a column \texttt{v} of the values of the desired variable to be 
+contained in the raster
+* \texttt{proj}: the projection of the $x$ and $y$ coordinates specified in \texttt{v\_frame}. By default, this is set to \texttt{NULL}, such that there is no projection associated with the raster.
+* \texttt{toproj}: the desired transformed projection of the raster. By default, this is set to \texttt{NULL}, such that the output projection matches the projection set by the \texttt{proj} argument, if any.
+* \texttt{saveTIFF}: if set to \texttt{TRUE}, a \texttt{.tif} file will be saved. By default, set to \texttt{FALSE}.
+* \texttt{TIFFname}: the name of the \texttt{.tif} file to be created if \texttt{saveTIFF} is set to \texttt{TRUE}. By default, this is set to \texttt{"myTIFF.tif"}.
+
+Our $x$ and $y$ coordinates were derived from the Lambert azimuthal equal-area (LAEA) projection, centred over Europe. We will define this projection in \texttt{R} as follows:
+
+```{r, message=FALSE, warning=FALSE}
+library(rgdal) # package for defining the projection with the CRS function
+LAEA = CRS("+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 
+           +ellps=GRS80 +units=m +no_defs ")
+```
+
+We can now make a raster of the quantile misalignment map based on subsets of size $N = 1000$:
+
+```{r, message=FALSE, warning=FALSE}
+q1000_frame = data.frame(X = env.4km.Fr$X, Y = env.4km.Fr$Y, v = q1000$prop_no_match)
+q1000_raster = makeraster(q1000_frame, proj = LAEA)
+plot(q1000_raster)
+```
+
+We can convert to another projection, such as World Geodetic System of 1984 (WGS84), as follows:
+
+```{r, message=FALSE, warning=FALSE}
+WGS84 = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs")
+q1000_raster_WGS84 = makeraster(q1000_frame, proj = LAEA, toproj = WGS84)
+plot(q1000_raster_WGS84)
+```
+
+Some users may wish to save the raster to a file that can be used with other mapping software, such as QGIS. We can make a \texttt{.tif} file of the raster as follows:
+
+```{r, message=FALSE, warning=FALSE}
+q1000_raster_savetiff = makeraster(q1000_frame, proj = LAEA, 
+                          saveTIFF = TRUE, TIFFname = "Q1000_LAEA.tif")
+```
+
+# References
