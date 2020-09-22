@@ -1,7 +1,7 @@
 # appendix_SDM-PPM-stability-functions
 This repository contains the R code to (i) run a species distribution model in the point process modelling framework and to (ii) explore model stability (or the capacity to predict correctly all presence data) within the PPM perspective fitted with a lasso penalty and observer bias corrections. Different R functions which were written to establish intensity and coefficient measures. These functions are the stability assessment toolbox, referred to as “diagnostic tools”. Code, simulated data and a detailed tutorial illustrating use of this code are provided. The model is described in a paper submitted to Ecological Modelling.
 
-Hereafter: A short description of the supplied R functions to explore model stability, which are contained in the DiagnosticFunctions.R file supplied in the supplementary material. Full details of these functions and a demonstration of their usage appears in the RMarkdown tutorial in the supplementary material. 
+Here, a short description of the supplied R functions to explore model stability, which are contained in the DiagnosticFunctions.R file supplied in the supplementary material. Full details of these functions and a demonstration of their usage appears in the RMarkdown tutorial in the supplementary material. 
  
  <table>
 <tbody>
